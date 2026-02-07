@@ -10,6 +10,13 @@ pragma solidity ^0.8.19;
  * - 提供最核心的市场参数和解析结果
  */
 interface IPredictionMarket {
+    enum Outcome {
+        PENDING,
+        YES,
+        NO,
+        INVALID
+    }
+
     // ======= 基本只读信息 =======
     function vault() external view returns (address);
     function collateral() external view returns (address);
@@ -19,7 +26,7 @@ interface IPredictionMarket {
     function resolutionTime() external view returns (uint256);
 
     function resolved() external view returns (bool);
-    function outcome() external view returns (bool);
+    function outcome() external view returns (Outcome);
 
     // ======= 可选：隐含价格/概率 =======
     function getYesNoPrice()
@@ -28,6 +35,6 @@ interface IPredictionMarket {
         returns (uint256 yesPrice, uint256 noPrice);
 
     // ======= 事件 =======
-    event Resolved(address indexed market, bool outcome);
+    event Resolved(address indexed market, Outcome outcome);
 }
 
