@@ -5,10 +5,8 @@ import "forge-std/Test.sol";
 import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 
 import "../src/core/OCPVault.sol";
-import "../src/market/PredictionMarket.sol";
 import "../src/factory/OCPVaultFactory.sol";
 import "../src/interfaces/IOCPVault.sol";
-import "../src/interfaces/IPredictionMarket.sol";
 
 contract MockERC20 is ERC20 {
     constructor() ERC20("Mock", "MOCK") {}
@@ -47,14 +45,10 @@ contract PredictionMarketMVPTest is Test {
         vm.stopPrank();
 
         assertTrue(vaultAddr != address(0));
-        assertTrue(marketAddr != address(0));
-
-        PredictionMarket pm = PredictionMarket(marketAddr);
+        // 仅推金库版本：工厂不再创建预测市场
+        assertEq(marketAddr, address(0));
         OCPVault vault = OCPVault(vaultAddr);
-
-        assertEq(pm.yesReserve(), 500 ether);
-        assertEq(pm.noReserve(), 500 ether);
-        assertEq(pm.poolCollateral(), 1000 ether);
+        assertEq(vault.linkedMarket(), address(0));
     }
 
     function test_fullFlow() public {
@@ -67,13 +61,13 @@ contract PredictionMarketMVPTest is Test {
             resolutionTime,
             1 days,
             100 ether,
-            1000 ether,
+            0,
             "Test Event",
             "Description"
         );
         vm.stopPrank();
 
-        PredictionMarket pm = PredictionMarket(marketAddr);
+        assertEq(marketAddr, address(0));
         OCPVault vault = OCPVault(vaultAddr);
 
         // alice 质押并选是方
@@ -88,29 +82,15 @@ contract PredictionMarketMVPTest is Test {
         vault.stake(IOCPVault.Side.NO, 400 ether);
         vm.stopPrank();
 
-        // alice 买 YES
-        vm.startPrank(alice);
-        token.approve(address(pm), type(uint256).max);
-        pm.buyYes(100 ether, 0);
-        vm.stopPrank();
-
-        assertGt(pm.yesShares(alice), 0);
         assertGt(vault.totalPrincipal(), 0);
 
-        // 快进到结算时间
+        // 快进到冷静期结束并终局：alice 500 > bob 400，是方胜
         vm.warp(resolutionTime + 1 days + 1);
+        vault.finalize();
+        assertTrue(vault.resolved());
+        assertEq(uint256(vault.outcome()), uint256(IOCPVault.Outcome.YES));
 
-        // 解析：alice 500 > bob 400，是方胜
-        pm.resolve();
-        assertTrue(pm.resolved());
-        assertEq(uint256(pm.outcome()), uint256(IPredictionMarket.Outcome.YES));
-
-        // 赎回
-        uint256 aliceYes = pm.yesShares(alice);
-        vm.prank(alice);
-        pm.redeem(aliceYes, 0);
-
-        // 提款：赢家 alice 领本金+分红，输家 bob 可领其累计分红（预测市场 fee 按当时在池占比记入，本金已输给赢家）
+        // 提款：赢家 alice 领本金，输家 bob 无本金返还（无 donate 时应为 0）
         uint256 aliceBalBefore = token.balanceOf(alice);
         vm.prank(alice);
         vault.withdraw();
@@ -119,6 +99,6 @@ contract PredictionMarketMVPTest is Test {
         uint256 bobBalBefore = token.balanceOf(bob);
         vm.prank(bob);
         vault.withdraw();
-        assertGe(token.balanceOf(bob), bobBalBefore);
+        assertEq(token.balanceOf(bob), bobBalBefore);
     }
 }
