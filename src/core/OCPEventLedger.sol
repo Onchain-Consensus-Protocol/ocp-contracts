@@ -36,15 +36,24 @@ contract OCPEventLedger is IOCPEventLedger {
     /// @notice 深度声誉溢价：每多一层深度，赢方声誉增量乘以 (1 + DEPTH_REPUTATION_BONUS/PRECISION)
     uint256 public constant DEPTH_REPUTATION_BONUS = 1e17; // 0.1 per depth
 
+    /// @dev 下一个事件 ID（从 1 开始）
     uint256 private _nextEventId = 1;
+    /// @dev 已终局事件计数
     uint256 private _totalFinalizedEvents;
+    /// @dev 挑战成功计数（路径统计用，当前未暴露接口）
     uint256 private _totalDisputeSuccess;
 
+    /// @dev 事件记录表
     mapping(uint256 => EventRecord) private _events;
+    /// @dev 每个事件参与者列表（用于分配保证金与声誉）
     mapping(uint256 => address[]) private _participants;
+    /// @dev 事件内每个用户的质押金额
     mapping(uint256 => mapping(address => uint256)) private _stakeAmount;
+    /// @dev 事件内每个用户的立场（A/B）
     mapping(uint256 => mapping(address => bool)) private _stakeSideA;
+    /// @dev 用户声誉表
     mapping(address => UserReputation) private _userReputation;
+    /// @dev 事件挑战保证金（ETH）暂存
     mapping(uint256 => uint256) private _challengeBondPaid;
 
     event EventCreated(
@@ -57,9 +66,23 @@ contract OCPEventLedger is IOCPEventLedger {
         uint256 epochAtCreation,
         uint256 depth
     );
-    event Staked(uint256 indexed eventId, address indexed user, bool sideA, uint256 amount);
-    event Challenged(uint256 indexed eventId, address indexed challenger, bool leadingSideA, uint256 bondPaid);
-    event EventFinalized(uint256 indexed eventId, bool outcome, uint256 epochAtCreation);
+    event Staked(
+        uint256 indexed eventId,
+        address indexed user,
+        bool sideA,
+        uint256 amount
+    );
+    event Challenged(
+        uint256 indexed eventId,
+        address indexed challenger,
+        bool leadingSideA,
+        uint256 bondPaid
+    );
+    event EventFinalized(
+        uint256 indexed eventId,
+        bool outcome,
+        uint256 epochAtCreation
+    );
 
     // -------------------------------------------------------------------------
     // 只读视图
@@ -81,12 +104,16 @@ contract OCPEventLedger is IOCPEventLedger {
     }
 
     /// @notice 按 ID 返回事件记录（含父引用、权重、挑战状态等）
-    function getEvent(uint256 eventId) external view override returns (EventRecord memory) {
+    function getEvent(
+        uint256 eventId
+    ) external view override returns (EventRecord memory) {
         return _events[eventId];
     }
 
     /// @notice 返回用户的声誉（累计赢方质押、参与事件数等）
-    function getUserReputation(address user) external view override returns (UserReputation memory) {
+    function getUserReputation(
+        address user
+    ) external view override returns (UserReputation memory) {
         return _userReputation[user];
     }
 
@@ -110,6 +137,7 @@ contract OCPEventLedger is IOCPEventLedger {
         bytes32 parentSnapshot = bytes32(0);
 
         if (parentEventId != 0) {
+            // 子事件：父必须存在且已终局
             EventRecord storage parent = _events[parentEventId];
             require(parent.eventId != 0, "OCP: invalid parent");
             require(parent.finalized, "OCP: parent not finalized");
@@ -120,6 +148,7 @@ contract OCPEventLedger is IOCPEventLedger {
 
         eventId = _nextEventId++;
         uint256 epoch = _totalFinalizedEvents / EPOCH_SIZE;
+        // 按父链争议成功率调整挑战保证金
         uint256 b = _adjustedChallengeBond(baseChallengeBond, parentEventId);
         uint256 stakeWindowEnd = block.timestamp + stakeWindowSeconds;
         uint256 challengeWindowEnd = stakeWindowEnd + challengeWindowSeconds;
@@ -163,24 +192,34 @@ contract OCPEventLedger is IOCPEventLedger {
 
     /// @notice 对指定事件质押：绑定立场（sideA=true 为 A 方，false 为 B 方）与金额；有效权重按声誉加成累加到 totalWeightA/B。
     /// @dev 允许质押的时段：初始质押窗口内，或已被挑战且处于再质押期内。
-    function stake(uint256 eventId, bool sideA, uint256 amount) external override {
+    function stake(
+        uint256 eventId,
+        bool sideA,
+        uint256 amount
+    ) external override {
         EventRecord storage e = _events[eventId];
         require(e.eventId != 0, "OCP: invalid event");
         require(!e.finalized, "OCP: event finalized");
         bool inStakeWindow = block.timestamp < e.stakeWindowEnd;
-        bool inReStakeWindow = e.challenged && block.timestamp < e.reStakePeriodEnd;
+        bool inReStakeWindow = e.challenged &&
+            block.timestamp < e.reStakePeriodEnd;
         require(inStakeWindow || inReStakeWindow, "OCP: stake window closed");
         require(amount > 0, "OCP: zero stake");
 
         if (_stakeAmount[eventId][msg.sender] == 0) {
+            // 首次参与：记录参与者与立场
             _participants[eventId].push(msg.sender);
             _userReputation[msg.sender].totalParticipatedEvents += 1;
             _stakeSideA[eventId][msg.sender] = sideA;
         } else {
-            require(_stakeSideA[eventId][msg.sender] == sideA, "OCP: same side only");
+            require(
+                _stakeSideA[eventId][msg.sender] == sideA,
+                "OCP: same side only"
+            );
         }
 
         _stakeAmount[eventId][msg.sender] += amount;
+        // 计算声誉加权后的有效权重
         uint256 weight = _effectiveStakeWeightInternal(msg.sender, amount);
 
         if (sideA) {
@@ -204,12 +243,20 @@ contract OCPEventLedger is IOCPEventLedger {
         require(e.eventId != 0, "OCP: invalid event");
         require(!e.finalized, "OCP: event finalized");
         require(!e.challenged, "OCP: already challenged");
-        require(block.timestamp >= e.stakeWindowEnd && block.timestamp < e.challengeWindowEnd, "OCP: not in challenge window");
+        require(
+            block.timestamp >= e.stakeWindowEnd &&
+                block.timestamp < e.challengeWindowEnd,
+            "OCP: not in challenge window"
+        );
         require(msg.value >= e.challengeBond, "OCP: bond too low");
 
+        // 只能由劣势方发起挑战
         bool leadingA = e.totalWeightA >= e.totalWeightB;
         bool callerSideA = _stakeSideA[eventId][msg.sender];
-        require(callerSideA != leadingA, "OCP: only disadvantage can challenge");
+        require(
+            callerSideA != leadingA,
+            "OCP: only disadvantage can challenge"
+        );
 
         e.challenged = true;
         e.reStakePeriodEnd = block.timestamp + RE_STAKE_PERIOD_SECONDS;
@@ -230,11 +277,18 @@ contract OCPEventLedger is IOCPEventLedger {
         require(e.eventId != 0, "OCP: invalid event");
         require(!e.finalized, "OCP: already finalized");
         if (e.challenged) {
-            require(block.timestamp >= e.reStakePeriodEnd, "OCP: re-stake period not ended");
+            require(
+                block.timestamp >= e.reStakePeriodEnd,
+                "OCP: re-stake period not ended"
+            );
         } else {
-            require(block.timestamp >= e.challengeWindowEnd, "OCP: window not ended");
+            require(
+                block.timestamp >= e.challengeWindowEnd,
+                "OCP: window not ended"
+            );
         }
 
+        // 写入终局并更新全局计数
         e.finalized = true;
         e.outcome = outcome;
         _totalFinalizedEvents += 1;
@@ -244,6 +298,7 @@ contract OCPEventLedger is IOCPEventLedger {
         }
 
         uint256 bond = _challengeBondPaid[eventId];
+        // 若存在挑战保证金，则按赢家权重分配
         if (bond > 0) {
             _distributeBondToWinners(eventId, outcome, bond);
             _challengeBondPaid[eventId] = 0;
@@ -255,13 +310,16 @@ contract OCPEventLedger is IOCPEventLedger {
         uint256 depthBonus = PRECISION + (e.depth * DEPTH_REPUTATION_BONUS);
 
         address[] storage participants = _participants[eventId];
+        // 赢家声誉加分（受纪元减半与深度溢价影响）
         for (uint256 i = 0; i < participants.length; i++) {
             address user = participants[i];
             uint256 amt = _stakeAmount[eventId][user];
             bool sideA = _stakeSideA[eventId][user];
             bool winner = (outcome && sideA) || (!outcome && !sideA);
             if (winner && amt > 0) {
-                uint256 credit = (amt * reputationFactor * depthBonus) / PRECISION / PRECISION;
+                uint256 credit = (amt * reputationFactor * depthBonus) /
+                    PRECISION /
+                    PRECISION;
                 _userReputation[user].cumulativeWinningStake += credit;
             }
         }
@@ -274,12 +332,19 @@ contract OCPEventLedger is IOCPEventLedger {
     // -------------------------------------------------------------------------
 
     /// @notice 给定用户与基础质押量，返回有效权重（用于比较双方强弱、分配保证金）。声誉越高权重越高，受纪元 cap 限制。
-    function effectiveStakeWeight(address user, uint256 baseStake) external view override returns (uint256) {
+    function effectiveStakeWeight(
+        address user,
+        uint256 baseStake
+    ) external view override returns (uint256) {
         return _effectiveStakeWeightInternal(user, baseStake);
     }
 
     /// @dev 有效权重 = baseStake * (1 + min(声誉, 纪元上限))；声誉与 cap 均以 PRECISION 为基。
-    function _effectiveStakeWeightInternal(address user, uint256 baseStake) internal view returns (uint256) {
+    function _effectiveStakeWeightInternal(
+        address user,
+        uint256 baseStake
+    ) internal view returns (uint256) {
+        // 纪元减半：E 越大，有效声誉上限越低
         uint256 epoch = _totalFinalizedEvents / EPOCH_SIZE;
         uint256 E = epoch;
         if (E > HALVING_CAP) E = HALVING_CAP;
@@ -290,9 +355,14 @@ contract OCPEventLedger is IOCPEventLedger {
     }
 
     /// @dev 对父事件做共识快照：keccak256(eventId, outcome, totalStakeA, totalStakeB)，子事件创建后不可篡改。
-    function _snapshotParentConsensus(uint256 parentEventId) internal view returns (bytes32) {
+    function _snapshotParentConsensus(
+        uint256 parentEventId
+    ) internal view returns (bytes32) {
         EventRecord storage p = _events[parentEventId];
-        return keccak256(abi.encode(p.eventId, p.outcome, p.totalStakeA, p.totalStakeB));
+        return
+            keccak256(
+                abi.encode(p.eventId, p.outcome, p.totalStakeA, p.totalStakeB)
+            );
     }
 
     /// @dev 按父链/路径的挑战成功率调整保证金，并设上限，避免全局历史包袱。
@@ -300,7 +370,10 @@ contract OCPEventLedger is IOCPEventLedger {
     ///      低成功率 → 高保证金（恶意骚扰抑制）；高成功率 → 接近 base。最终 bond <= base * MAX_CHALLENGE_BOND_MULTIPLIER/PRECISION。
     /// @param baseBond 应用层传入的基础保证金
     /// @param parentEventId 父事件 ID，0 表示根事件（无父链，按 rate=0 处理）
-    function _adjustedChallengeBond(uint256 baseBond, uint256 parentEventId) internal view returns (uint256) {
+    function _adjustedChallengeBond(
+        uint256 baseBond,
+        uint256 parentEventId
+    ) internal view returns (uint256) {
         uint256 rate = _pathDisputeRate(parentEventId);
         uint256 rawBond = (baseBond * (2 * PRECISION - rate)) / PRECISION;
         uint256 cap = (baseBond * MAX_CHALLENGE_BOND_MULTIPLIER) / PRECISION;
@@ -309,7 +382,9 @@ contract OCPEventLedger is IOCPEventLedger {
 
     /// @dev 沿父链向上统计「被挑战次数」与「挑战方获胜次数」，返回成功率（PRECISION 为 1）。
     ///      仅追溯 MAX_BOND_ANCESTORS 层，避免长链 gas 无界。
-    function _pathDisputeRate(uint256 parentEventId) internal view returns (uint256) {
+    function _pathDisputeRate(
+        uint256 parentEventId
+    ) internal view returns (uint256) {
         if (parentEventId == 0) return 0;
         uint256 pathChallenged = 0;
         uint256 pathDisputeSuccess = 0;
@@ -318,8 +393,10 @@ contract OCPEventLedger is IOCPEventLedger {
             EventRecord storage p = _events[cur];
             if (p.eventId == 0) break;
             if (p.challenged) {
+                // 统计被挑战次数与挑战成功次数
                 pathChallenged += 1;
-                if (p.outcome != p.leadingSideAAtChallenge) pathDisputeSuccess += 1;
+                if (p.outcome != p.leadingSideAAtChallenge)
+                    pathDisputeSuccess += 1;
             }
             cur = p.parentEventId;
         }
@@ -331,28 +408,41 @@ contract OCPEventLedger is IOCPEventLedger {
     receive() external payable {}
 
     /// @dev 将挑战保证金按赢方的有效权重比例分配给赢方（同事件内）；若无赢方则不分配。
-    function _distributeBondToWinners(uint256 eventId, bool outcome, uint256 bond) internal {
+    function _distributeBondToWinners(
+        uint256 eventId,
+        bool outcome,
+        uint256 bond
+    ) internal {
         address[] storage participants = _participants[eventId];
         uint256 totalWinnerWeight = 0;
+        // 第一遍：计算赢家总权重
         for (uint256 i = 0; i < participants.length; i++) {
             address user = participants[i];
             bool sideA = _stakeSideA[eventId][user];
             bool winner = (outcome && sideA) || (!outcome && !sideA);
             if (winner) {
-                uint256 w = _effectiveStakeWeightInternal(user, _stakeAmount[eventId][user]);
+                uint256 w = _effectiveStakeWeightInternal(
+                    user,
+                    _stakeAmount[eventId][user]
+                );
                 totalWinnerWeight += w;
             }
         }
         if (totalWinnerWeight == 0) return;
+        // 第二遍：按权重比例分配保证金
         for (uint256 i = 0; i < participants.length; i++) {
             address user = participants[i];
             bool sideA = _stakeSideA[eventId][user];
             bool winner = (outcome && sideA) || (!outcome && !sideA);
             if (winner) {
-                uint256 w = _effectiveStakeWeightInternal(user, _stakeAmount[eventId][user]);
+                uint256 w = _effectiveStakeWeightInternal(
+                    user,
+                    _stakeAmount[eventId][user]
+                );
                 uint256 share = (bond * w) / totalWinnerWeight;
                 if (share > 0) {
-                    (bool ok,) = user.call{value: share}("");
+                    // 直接转账给赢家（ETH）
+                    (bool ok, ) = user.call{value: share}("");
                     require(ok, "OCP: bond transfer failed");
                 }
             }

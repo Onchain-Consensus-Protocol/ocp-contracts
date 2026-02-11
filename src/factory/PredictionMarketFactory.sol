@@ -13,9 +13,12 @@ import "../market/PredictionMarket.sol";
  * - 统一绑定 Treasury 作为费用兜底接收方
  */
 contract PredictionMarketFactory {
+    /// @notice 用于校验金库合法性的工厂地址
     address public immutable vaultFactory;
+    /// @notice 费用兜底接收方（预留）
     address public immutable treasury;
 
+    /// @notice 已创建市场列表（顺序与创建时间一致）
     address[] public markets;
 
     event MarketCreated(
@@ -50,11 +53,14 @@ contract PredictionMarketFactory {
         uint256 resolutionTime,
         uint256 initialLiquidity
     ) external returns (address market) {
+        // 参数校验
         require(vault != address(0), "Invalid vault");
         require(resolutionTime > block.timestamp, "Invalid resolutionTime");
 
+        // 确认该金库由指定的工厂创建
         require(_isVaultFromFactory(vault), "Vault not from factory");
 
+        // 实例化预测市场（AMM 与金库绑定）
         PredictionMarket pm = new PredictionMarket(
             vault,
             treasury,
@@ -74,17 +80,21 @@ contract PredictionMarketFactory {
         return market;
     }
 
+    /// @notice 返回所有已创建市场
     function getMarkets() external view returns (address[] memory) {
         return markets;
     }
 
+    /// @notice 返回市场数量
     function getMarketsCount() external view returns (uint256) {
         return markets.length;
     }
 
     // ======= 内部工具 =======
+    /// @notice 判断金库是否由 vaultFactory 创建（线性扫描，适合 POC 规模）
     function _isVaultFromFactory(address vault) internal view returns (bool) {
-        address[] memory vaults = IConsensusVaultFactory(vaultFactory).getVaults();
+        address[] memory vaults = IConsensusVaultFactory(vaultFactory)
+            .getVaults();
         for (uint256 i = 0; i < vaults.length; i++) {
             if (vaults[i] == vault) {
                 return true;
@@ -98,5 +108,6 @@ contract PredictionMarketFactory {
  * @dev 仅用于读取金库列表的最小接口
  */
 interface IConsensusVaultFactory {
+    /// @notice 返回工厂创建的全部金库列表
     function getVaults() external view returns (address[] memory);
 }

@@ -12,14 +12,18 @@ import "../market/PredictionMarket.sol";
  */
 contract OCPVaultFactory {
     using SafeERC20 for IERC20;
+    /// @notice 已创建金库列表
     address[] public vaults;
+    /// @notice 已创建市场列表
     address[] public markets;
 
+    /// @notice 市场元信息（标题/说明），供前端展示
     struct MarketMeta {
         string title;
         string description;
     }
 
+    /// @dev 以市场地址索引元信息
     mapping(address => MarketMeta) private _metaByMarket;
 
     event MarketCreated(
@@ -48,11 +52,13 @@ contract OCPVaultFactory {
         string calldata title,
         string calldata description
     ) external returns (address vaultAddr, address marketAddr) {
+        // 参数校验
         require(stakeToken != address(0), "Invalid token");
         require(resolutionTime > block.timestamp, "Invalid resolutionTime");
         require(challengeWindowSeconds > 0, "Invalid challenge window");
         require(minStake > 0, "Invalid min stake");
 
+        // 1) 创建金库（负责共识/终局）
         OCPVault v = new OCPVault(
             address(this),
             stakeToken,
@@ -62,6 +68,7 @@ contract OCPVaultFactory {
         );
         vaultAddr = address(v);
 
+        // 2) 创建预测市场（AMM + 手续费捐赠）
         PredictionMarket m = new PredictionMarket(
             vaultAddr,
             address(0), // treasury 预留
@@ -71,6 +78,7 @@ contract OCPVaultFactory {
         );
         marketAddr = address(m);
 
+        // 3) 绑定市场到金库，便于外部查询与协作
         v.setLinkedMarket(marketAddr);
 
         vaults.push(vaultAddr);
@@ -80,6 +88,8 @@ contract OCPVaultFactory {
             description: description
         });
 
+        // 4) 可选：创建者注入初始流动性
+        // 注意：调用方需提前对工厂地址进行 ERC20 授权
         if (initialLiquidity > 0) {
             _addInitialLiquidity(stakeToken, marketAddr, initialLiquidity);
         }
@@ -93,25 +103,30 @@ contract OCPVaultFactory {
         );
     }
 
+    /// @dev 内部注入初始流动性：先转入工厂，再授权给市场完成注入
     function _addInitialLiquidity(
         address token,
         address market,
         uint256 amount
     ) internal {
+        // 将代币转入工厂，再授权给市场合约
         IERC20 t = IERC20(token);
         t.safeTransferFrom(msg.sender, address(this), amount);
         t.safeIncreaseAllowance(market, amount);
         PredictionMarket(market).addLiquidity(amount);
     }
 
+    /// @notice 返回已创建市场列表
     function getMarkets() external view returns (address[] memory) {
         return markets;
     }
 
+    /// @notice 返回已创建金库列表
     function getVaults() external view returns (address[] memory) {
         return vaults;
     }
 
+    /// @notice 返回市场元信息（标题/说明）
     function getMarketMeta(
         address market
     ) external view returns (string memory title, string memory description) {
