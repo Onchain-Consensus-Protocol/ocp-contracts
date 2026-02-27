@@ -59,6 +59,20 @@ interface IOCPVault {
     function outcome() external view returns (Outcome);
     /// @notice 是否满足终局条件（不改变状态）
     function canResolve() external view returns (bool);
+    /// @notice 是否启用随机结束窗口
+    function randomizedEndEnabled() external view returns (bool);
+    /// @notice 随机结束是否已揭示
+    function randomizedEndRevealed() external view returns (bool);
+    /// @notice 随机结束 keeper
+    function randomizedEndKeeper() external view returns (address);
+    /// @notice 随机结束 commit（seed 承诺）
+    function randomizedEndCommit() external view returns (bytes32);
+    /// @notice 随机窗口起点
+    function randomizedEndWindowStart() external view returns (uint64);
+    /// @notice 随机窗口长度（秒）
+    function randomizedEndWindowLength() external view returns (uint32);
+    /// @notice 揭示后的真实结束时间
+    function randomizedEndTime() external view returns (uint64);
 
     /// @notice 进行质押（按 Side，质押期/挑战期/冷静期规则由实现约束）
     function stake(Side side, uint256 amount) external;
@@ -70,4 +84,6 @@ interface IOCPVault {
     function donate(uint256 amount) external;
     /// @notice 终局后提现（含本金与分红，每地址仅一次）
     function withdraw() external;
+    /// @notice 由 keeper 揭示随机结束时间
+    function revealRandomizedEnd(bytes32 seed) external;
 }

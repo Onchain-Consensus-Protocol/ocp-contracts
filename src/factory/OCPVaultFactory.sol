@@ -23,6 +23,8 @@ contract OCPVaultFactory {
     mapping(address => MarketMeta) private _metaByMarket;
     /// @dev 以金库地址索引元信息（当前仅推金库）
     mapping(address => MarketMeta) private _metaByVault;
+    /// @dev 记录每个金库的创建者（用于后续权限操作）
+    mapping(address => address) private _creatorByVault;
 
     event MarketCreated(
         address indexed market,
@@ -78,6 +80,7 @@ contract OCPVaultFactory {
             title: title,
             description: description
         });
+        _creatorByVault[vaultAddr] = msg.sender;
         initialLiquidity; // reserved
 
         emit MarketCreated(
@@ -113,5 +116,34 @@ contract OCPVaultFactory {
     ) external view returns (string memory title, string memory description) {
         MarketMeta storage meta = _metaByVault[vault];
         return (meta.title, meta.description);
+    }
+
+    /// @notice 读取某金库创建者
+    function getVaultCreator(address vault) external view returns (address) {
+        return _creatorByVault[vault];
+    }
+
+    /**
+     * @notice 为指定金库配置“随机结束窗口”参数（由该金库创建者调用）
+     * @param vault 金库地址
+     * @param keeper 负责 reveal 的 keeper 地址
+     * @param commit seed 承诺值（keccak256）
+     * @param windowStart 随机窗口起点（unix 秒）
+     * @param windowLength 随机窗口长度（秒）
+     */
+    function configureRandomizedEnd(
+        address vault,
+        address keeper,
+        bytes32 commit,
+        uint64 windowStart,
+        uint32 windowLength
+    ) external {
+        require(vault != address(0), "Invalid vault");
+        OCPVault(vault).configureRandomizedEnd(
+            keeper,
+            commit,
+            windowStart,
+            windowLength
+        );
     }
 }
