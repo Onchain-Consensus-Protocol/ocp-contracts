@@ -81,20 +81,8 @@ contract OCPVault is ReentrancyGuard, IOCPVault {
     /// @notice 当前挑战类型（NONE/YES_NO/INVALID）
     ChallengeType public challengeType;
 
-    /// @notice 随机结束窗口配置（可选）
+    /// @notice 是否启用随机结束（TEE + VRF 模式）
     bool public randomizedEndEnabled;
-    /// @notice 随机结束是否已揭示
-    bool public randomizedEndRevealed;
-    /// @notice 负责揭示随机结束时间的 keeper
-    address public randomizedEndKeeper;
-    /// @notice seed 承诺（commit-reveal）
-    bytes32 public randomizedEndCommit;
-    /// @notice 随机窗口起始时间（unix 秒）
-    uint64 public randomizedEndWindowStart;
-    /// @notice 随机窗口长度（秒）
-    uint32 public randomizedEndWindowLength;
-    /// @notice 揭示后得到的真实结束时间（unix 秒）
-    uint64 public randomizedEndTime;
 
     /// @notice 用户质押事件
     event Staked(address indexed user, Side side, uint256 amount);
@@ -117,18 +105,7 @@ contract OCPVault is ReentrancyGuard, IOCPVault {
     event Finalized(Outcome outcome);
     /// @notice 终局后提现事件
     event Withdrawn(address indexed user, uint256 payout);
-    /// @notice 随机结束窗口已配置
-    event RandomizedEndConfigured(
-        address indexed keeper,
-        bytes32 indexed commit,
-        uint64 windowStart,
-        uint32 windowLength
-    );
-    /// @notice 随机结束时间已揭示
-    event RandomizedEndRevealed(
-        uint64 randomizedEndTime,
-        bytes32 indexed revealSeed
-    );
+
 
     constructor(
         address _factory,
@@ -195,71 +172,46 @@ contract OCPVault is ReentrancyGuard, IOCPVault {
     }
 
     /// @notice 是否满足终局条件（不改变状态）
+    /// @dev 随机结束启用后，canResolve() 永远返回 false。
+    ///      只有 factory（代表 TEE Keeper）可以通过 finalizeByFactory() 触发结算。
     function canResolve() public view override returns (bool) {
-        // 已终局直接返回 true；否则依据是否挑战与时间判断
         if (resolved) return true;
+        // 随机结束模式：外部永远无法通过 canResolve() → finalize() 触发
+        if (randomizedEndEnabled) return false;
         uint256 baseResolveTime = challenged
             ? reStakePeriodEnd
             : challengeWindowEnd;
-        if (!randomizedEndEnabled) return block.timestamp >= baseResolveTime;
-        if (!randomizedEndRevealed) return false;
-        uint256 finalResolveTime = randomizedEndTime > baseResolveTime
-            ? randomizedEndTime
-            : baseResolveTime;
-        return block.timestamp >= finalResolveTime;
+        return block.timestamp >= baseResolveTime;
     }
 
-    /// @notice 工厂代表创建者配置随机结束窗口（commit-reveal）
-    function configureRandomizedEnd(
-        address keeper,
-        bytes32 commit,
-        uint64 windowStart,
-        uint32 windowLength
-    ) external {
+    /// @notice 由 factory 调用，启用随机结束模式（TEE + VRF）
+    function enableRandomizedEnd() external {
         require(msg.sender == factory, "Only factory");
         require(!resolved, "Already finalized");
-        require(!challenged, "Challenge already started");
-        require(block.timestamp < challengeWindowEnd, "Window already passed");
-        require(!randomizedEndEnabled, "Already configured");
-        require(keeper != address(0), "Invalid keeper");
-        require(commit != bytes32(0), "Invalid commit");
-        require(windowLength > 0, "Invalid window length");
-
+        require(!randomizedEndEnabled, "Already enabled");
         randomizedEndEnabled = true;
-        randomizedEndKeeper = keeper;
-        randomizedEndCommit = commit;
-        randomizedEndWindowStart = windowStart;
-        randomizedEndWindowLength = windowLength;
-
-        emit RandomizedEndConfigured(keeper, commit, windowStart, windowLength);
     }
 
-    /// @notice keeper 在结束后揭示随机时间；seed 对应 commit
-    function revealRandomizedEnd(bytes32 seed) external {
-        require(randomizedEndEnabled, "Randomized end not enabled");
-        require(msg.sender == randomizedEndKeeper, "Only keeper");
-        require(!randomizedEndRevealed, "Already revealed");
-        require(
-            keccak256(
-                abi.encodePacked(
-                    seed,
-                    address(this),
-                    randomizedEndWindowStart,
-                    randomizedEndWindowLength
-                )
-            ) == randomizedEndCommit,
-            "Invalid reveal"
-        );
+    /// @notice 由 factory 调用，TEE Keeper 触发结算
+    /// @dev 这是随机结束模式下唯一的结算入口；链上无任何结算时间信息
+    function finalizeByFactory() external nonReentrant {
+        require(msg.sender == factory, "Only factory");
+        require(!resolved, "Already finalized");
+        require(randomizedEndEnabled, "Not random-end vault");
 
-        uint256 offset = uint256(
-            keccak256(abi.encodePacked(seed, blockhash(block.number - 1)))
-        ) % (uint256(randomizedEndWindowLength) + 1);
-        uint256 revealTime = uint256(randomizedEndWindowStart) + offset;
-        require(revealTime <= type(uint64).max, "Time overflow");
+        uint256 total = _totalPrincipal;
+        if (total == 0) {
+            outcome = Outcome.INVALID;
+        } else if (_totalStakeYes * 2 > total) {
+            outcome = Outcome.YES;
+        } else if (_totalStakeNo * 2 > total) {
+            outcome = Outcome.NO;
+        } else {
+            outcome = Outcome.INVALID;
+        }
+        resolved = true;
 
-        randomizedEndTime = uint64(revealTime);
-        randomizedEndRevealed = true;
-        emit RandomizedEndRevealed(uint64(revealTime), seed);
+        emit Finalized(outcome);
     }
 
     /// @notice 统一质押入口：质押期可押 YES/NO；冷静期仅可押 b 于劣势方或 INVALID（即发起挑战）；挑战期可押 YES/NO/INVALID 或移仓

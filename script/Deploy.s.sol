@@ -40,7 +40,13 @@ contract DeployScript is Script {
         address deployer = vm.addr(deployerPrivateKey);
         token.mint(deployer, 1_000_000 * 1e18);
 
-        OCPVaultFactory factory = new OCPVaultFactory();
+        OCPVaultFactory factory = new OCPVaultFactory(
+            address(0x1),   // vrfCoordinator placeholder
+            0,              // subscriptionId placeholder
+            bytes32(0),     // keyHash placeholder
+            200000,         // callbackGasLimit
+            3               // requestConfirmations
+        );
 
         vm.stopBroadcast();
 

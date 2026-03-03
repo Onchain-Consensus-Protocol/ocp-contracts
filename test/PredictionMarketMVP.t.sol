@@ -25,7 +25,13 @@ contract PredictionMarketMVPTest is Test {
         token = new MockERC20();
         token.mint(alice, 10_000 ether);
         token.mint(bob, 10_000 ether);
-        factory = new OCPVaultFactory();
+        factory = new OCPVaultFactory(
+            address(0x1),   // mock vrfCoordinator
+            0,              // subscriptionId
+            bytes32(0),     // keyHash
+            200000,         // callbackGasLimit
+            3               // requestConfirmations
+        );
     }
 
     function test_createMarket_and_addLiquidity() public {
